@@ -28,8 +28,9 @@ LOG_PATH = os.path.expanduser("~/.local/share/llm-ibus/auto_learn.log")
 STATE_PATH = os.path.expanduser("~/.local/share/llm-ibus/last_learn.json")
 
 # Keep at most this many unselected LLM seeds in the DB — prevents the
-# "landfill" effect where freq=1 noise drowns out real phrases.
-MAX_SEEDS = 500
+# "landfill" effect where freq=1 noise drowns out real phrases. Higher than
+# before because each phrase now also yields small context-bearing n-gram rows.
+MAX_SEEDS = 1500
 PRUNE_HOURS = 48
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
@@ -277,7 +278,40 @@ Return ONLY a JSON array of strings."""
 
 # ── DB writes ─────────────────────────────────────────────────────────────────
 
+def _upsert(conn, input_phrase, phrase, p_phrase, pp_phrase, now) -> None:
+    """Insert a row, or boost user_freq if it already exists (the n-gram count signal)."""
+    existing = conn.execute(
+        "SELECT id, user_freq FROM phrases WHERE input_phrase=? AND phrase=? AND p_phrase=? AND pp_phrase=?",
+        (input_phrase, phrase, p_phrase, pp_phrase),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE phrases SET user_freq=?, timestamp=? WHERE id=?",
+            (existing[1] + 1, now, existing[0]),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO phrases (input_phrase, phrase, p_phrase, pp_phrase, user_freq, timestamp) VALUES (?,?,?,?,?,?)",
+            (input_phrase, phrase, p_phrase, pp_phrase, 1, now),
+        )
+
+
 def insert_phrases(phrases: list[str]) -> int:
+    """Insert LLM phrases in typing-booster's native format.
+
+    For each phrase we store two kinds of rows, mirroring how typing-booster
+    records real typing:
+
+      1. Whole-phrase completion under its first word (bare-prefix match)
+         e.g. ('rate', 'rate limiting policy', '', '')
+      2. Context-bearing trigram rows for every word, so the n-gram ranker can
+         predict the next word from the preceding 1-2 words:
+         e.g. ('limiting', 'limiting', 'rate', ''),
+              ('policy',   'policy',   'limiting', 'rate')
+
+    Row (2) is the real improvement — it lets injected phrases participate in
+    typing-booster's proven context ranking instead of only first-word matching.
+    """
     if not phrases:
         return 0
 
@@ -290,25 +324,18 @@ def insert_phrases(phrases: list[str]) -> int:
         if not tokens:
             continue
 
-        input_phrase = tokens[0]
-
-        existing = conn.execute(
-            "SELECT id, user_freq FROM phrases WHERE input_phrase=? AND phrase=?",
-            (input_phrase, phrase),
-        ).fetchone()
-
-        if existing:
-            # Boost frequency slightly — LLM suggested it again, so it's relevant
-            conn.execute(
-                "UPDATE phrases SET user_freq=?, timestamp=? WHERE id=?",
-                (existing[1] + 1, now, existing[0]),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO phrases (input_phrase, phrase, p_phrase, pp_phrase, user_freq, timestamp) VALUES (?,?,?,?,?,?)",
-                (input_phrase, phrase, "", "", 1, now),
-            )
+        # (1) whole-phrase completion under first word
+        _upsert(conn, tokens[0], phrase, "", "", now)
         count += 1
+
+        # (2) context-bearing single-word trigram rows
+        words = [t.lower() for t in tokens]
+        for i in range(1, len(words)):
+            w = words[i]
+            p = words[i - 1]
+            pp = words[i - 2] if i >= 2 else ""
+            _upsert(conn, w, w, p, pp, now)
+            count += 1
 
     conn.commit()
     conn.close()

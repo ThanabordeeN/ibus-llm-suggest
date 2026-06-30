@@ -20,13 +20,15 @@ conn = sqlite3.connect(DB_PATH)
 total   = conn.execute("SELECT COUNT(*) FROM phrases").fetchone()[0]
 human   = conn.execute("SELECT COUNT(*) FROM phrases WHERE user_freq >= 2").fetchone()[0]
 llm_gen = conn.execute("SELECT COUNT(*) FROM phrases WHERE user_freq = 1").fetchone()[0]
+ctx     = conn.execute("SELECT COUNT(*) FROM phrases WHERE p_phrase != ''").fetchone()[0]
 
 print("═" * 55)
 print("  typing-booster DB stats")
 print("═" * 55)
-print(f"  Total phrases        : {total}")
-print(f"  Typed by you (freq≥2): {human}  ← things you actually typed")
-print(f"  LLM-generated (freq=1): {llm_gen}  ← added by auto-learn")
+print(f"  Total phrases         : {total}")
+print(f"  Typed by you (freq≥2) : {human}  ← things you actually selected")
+print(f"  LLM seeds (freq=1)    : {llm_gen}  ← added by auto-learn")
+print(f"  Context-aware rows    : {ctx}  ← rank by what you typed before ({ctx*100//total if total else 0}%)")
 
 # ── 2. LLM-generated phrases that got SELECTED (freq bumped to ≥2) ───────────
 # We can't perfectly track which ones came from LLM vs human, but we can
