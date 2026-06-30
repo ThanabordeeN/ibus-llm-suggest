@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/
+# User config (contains API keys)
+~/.config/llm-ibus/
