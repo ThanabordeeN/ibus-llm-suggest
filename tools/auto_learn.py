@@ -147,23 +147,28 @@ A user's recent writing (their domain and style):
 
 Words they have already typed: {known_str}
 
-Your job: infer what RELATED words and phrases they have NOT yet typed but \
-will likely need soon — vocabulary that fits their domain but is missing from their history.
+Your job: generate exactly 500 short phrases (2–6 words) that this user \
+has NOT yet typed but is highly likely to need — based on their domain, context, and writing style.
 
-For example, if they write about Python APIs, they might not have typed \
-"rate limiting", "pagination", "retry logic", "status code" yet — but probably will.
+Think broadly across:
+- Sub-topics they haven't covered yet but are related to their domain
+- Common follow-up phrases to the topics they write about
+- Technical terms, actions, or concepts adjacent to what they already know
+- Different verb forms, tenses, and sentence positions for their vocabulary
+- Edge cases, error states, and follow-up actions in their domain
 
-Generate 80 short phrases (2–6 words) using this predicted new vocabulary.
+Requirements:
 - Every phrase MUST be grammatically correct English
-- Only include phrases with words NOT already in their known word list
-- Prioritize high-value domain-specific phrases
+- Prioritize phrases with vocabulary NOT already in their known word list
+- Cover as many different contexts and angles as possible
+- No duplicates — each phrase should be meaningfully distinct
 
-Return ONLY a JSON array of strings."""
+Return ONLY a JSON array of exactly 500 strings."""
 
     results = _call_llm(
         client, prompt,
         system="You predict future vocabulary for autocomplete. Return only a JSON array of grammatically correct phrases.",
-        max_tokens=5000,
+        max_tokens=12000,
     )
     log.info("New-word prediction produced %d phrases", len(results))
     return results
@@ -282,12 +287,6 @@ def main():
 
     recent = read_recent_phrases(since_ts=since)
     log.info("Found %d recent phrases since last run", len(recent))
-
-    if len(recent) < 5:
-        log.info("Not enough new phrases to learn from (%d), skipping LLM call", len(recent))
-        print(f"Only {len(recent)} new phrases since last run — skipping (need at least 5).")
-        save_state({"last_timestamp": now})
-        return
 
     # Prune stale LLM phrases that were never selected after 48h
     pruned = prune_stale(older_than_hours=48)
