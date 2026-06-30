@@ -68,19 +68,20 @@ def read_recent_phrases(since_ts: float, limit: int = 200) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _call_llm(client, prompt: str, system: str, max_tokens: int = 4000) -> list[str]:
+def _call_llm(client, prompt: str, system: str, max_tokens: int = 4000, timeout: int = 60) -> list[str]:
     """Shared LLM call — returns a parsed list of strings from a JSON array response."""
+    from daemon.config import load as load_config
     extra = {"extra_body": {"reasoning": {"effort": "high"}}}
     try:
         resp = client.chat.completions.create(
-            model=__import__("daemon.config", fromlist=["load"]).load()["model"],
+            model=load_config()["model"],
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=max_tokens,
             temperature=0.5,
-            timeout=60,
+            timeout=timeout,
             **extra,
         )
         raw = resp.choices[0].message.content or ""
@@ -127,10 +128,10 @@ Return ONLY a JSON array of strings."""
 
 
 def llm_predict_new_words(recent_phrases: list[str], all_known: list[str]) -> list[str]:
-    """Phase 3 — predict words/phrases the user has NEVER typed but likely will.
+    """Phase 3 — predict 500 new phrases via 5 parallel batches of 100.
 
-    Looks at the user's domain/context and surfaces related vocabulary they
-    haven't used yet, pre-loading typing-booster before they need it.
+    Each batch focuses on a different angle so we get broad coverage
+    without hitting timeout limits.
     """
     client = _make_client()
     sample = "\n".join(f"- {p}" for p in recent_phrases[:60])
@@ -141,37 +142,59 @@ def llm_predict_new_words(recent_phrases: list[str], all_known: list[str]) -> li
     )
     known_str = ", ".join(sorted(known_words)[:80])
 
-    prompt = f"""\
+    # 5 different angles — each batch targets a distinct prediction strategy
+    angles = [
+        ("sub-topics and related domains the user hasn't written about yet",
+         "sub-topic expansion"),
+        ("common follow-up actions, next steps, or consequences in their domain",
+         "follow-up actions"),
+        ("technical terms, jargon, and domain-specific vocabulary they are missing",
+         "technical vocabulary"),
+        ("error states, edge cases, troubleshooting, and problem-solving phrases",
+         "edge cases and errors"),
+        ("different verb tenses, sentence structures, and phrasings of familiar concepts",
+         "phrase variations"),
+    ]
+
+    def _batch(angle_desc: str, angle_name: str) -> list[str]:
+        prompt = f"""\
 A user's recent writing (their domain and style):
 {sample}
 
 Words they have already typed: {known_str}
 
-Your job: generate exactly 500 short phrases (2–6 words) that this user \
-has NOT yet typed but is highly likely to need — based on their domain, context, and writing style.
+Focus: {angle_desc}
 
-Think broadly across:
-- Sub-topics they haven't covered yet but are related to their domain
-- Common follow-up phrases to the topics they write about
-- Technical terms, actions, or concepts adjacent to what they already know
-- Different verb forms, tenses, and sentence positions for their vocabulary
-- Edge cases, error states, and follow-up actions in their domain
+Generate exactly 100 short phrases (2–6 words) this user has NOT typed yet \
+but will likely need, focusing specifically on the angle above.
 
 Requirements:
 - Every phrase MUST be grammatically correct English
-- Prioritize phrases with vocabulary NOT already in their known word list
-- Cover as many different contexts and angles as possible
-- No duplicates — each phrase should be meaningfully distinct
+- Prioritize vocabulary NOT in their known word list
+- All 100 phrases must be meaningfully distinct
 
-Return ONLY a JSON array of exactly 500 strings."""
+Return ONLY a JSON array of 100 strings."""
 
-    results = _call_llm(
-        client, prompt,
-        system="You predict future vocabulary for autocomplete. Return only a JSON array of grammatically correct phrases.",
-        max_tokens=12000,
-    )
-    log.info("New-word prediction produced %d phrases", len(results))
-    return results
+        result = _call_llm(
+            client, prompt,
+            system=f"You predict future autocomplete phrases ({angle_name}). Return only a JSON array.",
+            max_tokens=3000,
+            timeout=120,
+        )
+        log.info("Batch '%s': %d phrases", angle_name, len(result))
+        return result
+
+    all_results: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        futures = [ex.submit(_batch, desc, name) for desc, name in angles]
+        for f in concurrent.futures.as_completed(futures):
+            all_results.extend(f.result())
+
+    # Deduplicate
+    seen: set[str] = set()
+    unique = [p for p in all_results if p not in seen and not seen.add(p)]  # type: ignore
+    log.info("Phase 3 total: %d unique phrases from 5 batches", len(unique))
+    return unique
 
 
 def llm_expand_words(recent_phrases: list[str]) -> list[str]:
